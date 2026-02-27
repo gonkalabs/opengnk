@@ -1,0 +1,5 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+natasha==1.6.0
+# 3.7.x has prebuilt aarch64 wheels — avoids compiling from source on Apple Silicon / ARM servers
+spacy==3.7.6

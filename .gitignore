@@ -1,0 +1,7 @@
+.env
+/proxy
+*.exe
+tmp/
+.idea/
+.vscode/
+**/.DS_Store

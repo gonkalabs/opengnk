@@ -1,0 +1,84 @@
+services:
+  proxy:
+    build: .
+    ports:
+      - "${PORT:-8080}:8080"
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      sanitize-ner:
+        condition: service_healthy
+        required: false
+      ollama:
+        condition: service_healthy
+        required: false
+    healthcheck:
+      test: ["CMD", "sh", "-c", "printf 'GET /health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' | nc -w2 localhost 8080 | grep -q '\"status\"'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # -------------------------------------------------------------------------
+  # sanitize-ner: optional NER sidecar (Layer 2 of the sanitization pipeline)
+  #
+  # Provides Russian NER via Natasha and English NER via spaCy.
+  # Enable by setting SANITIZE_NER=true in .env.
+  # The proxy falls back gracefully if this service is not running.
+  # -------------------------------------------------------------------------
+  sanitize-ner:
+    build: ./services/sanitize-ner
+    expose:
+      - "8001"
+    restart: unless-stopped
+    profiles:
+      - sanitize
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s  # models take time to load on first start
+
+  # -------------------------------------------------------------------------
+  # ollama: optional local LLM for Layer 3 semantic classification
+  #
+  # Enable by setting SANITIZE_LLM=true in .env.
+  # Default model: qwen3:4b-instruct-2507-q4_K_M (~2.6 GB)
+  # -------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    expose:
+      - "11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    profiles:
+      - sanitize
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Pulls the model into the shared volume on first run, then exits.
+  # Re-running is a no-op because Ollama skips already-downloaded models.
+  ollama-init:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    profiles:
+      - sanitize
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "ollama pull ${SANITIZE_LLM_MODEL:-qwen3:4b-instruct-2507-q4_K_M} &&
+             echo 'ollama-init: model ready'"
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    restart: "no"
+
+volumes:
+  ollama_data:
