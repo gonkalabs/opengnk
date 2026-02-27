@@ -4,19 +4,6 @@ The proxy intercepts every outgoing message, strips sensitive values, and restor
 
 ## How it works
 
-```
-Your app          Proxy                       Gonka LLM
-   │                │                              │
-   │─ "My key is sk-abc123" ──────────────────────►│
-   │                │  1. classify text             │
-   │                │  2. replace: sk-abc123        │
-   │                │     → «TOKEN_000001»          │
-   │                │─ "My key is «TOKEN_000001»" ─►│
-   │                │◄─ "The key «TOKEN_000001» ..." │
-   │                │  3. restore tokens            │
-   │◄─ "The key sk-abc123 ..."────────────────────  │
-```
-
 1. The proxy receives your chat request.
 2. Each message is scanned by one or more classifiers (see below).
 3. Detected sensitive values are replaced with stable placeholders (`«TOKEN_000001»`, `«TOKEN_000002»`, ...).
