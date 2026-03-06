@@ -11,6 +11,7 @@ import (
 
 	"github.com/gonkalabs/gonka-proxy-go/internal/api"
 	"github.com/gonkalabs/gonka-proxy-go/internal/config"
+	"github.com/gonkalabs/gonka-proxy-go/internal/quality"
 	"github.com/gonkalabs/gonka-proxy-go/internal/sanitize"
 	"github.com/gonkalabs/gonka-proxy-go/internal/sanitize/llmclassifier"
 	"github.com/gonkalabs/gonka-proxy-go/internal/sanitize/ner"
@@ -83,12 +84,15 @@ func main() {
 
 	handler := api.New(client, cfg.SimulateToolCalls, san)
 
+	qm := quality.New()
+
 	mux := http.NewServeMux()
 	handler.Register(mux)
+	mux.Handle("GET /quality/stats", qm.StatsHandler())
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
-		Handler:      mux,
+		Handler:      qm.Wrap(mux),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 300 * time.Second,
 		IdleTimeout:  120 * time.Second,
