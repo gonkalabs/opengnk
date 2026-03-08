@@ -2,6 +2,9 @@
 // chat-completion prompts and converts the model's JSON response back
 // into the proper tool_calls format. This allows tool calling to work
 // even when the upstream inference server doesn't support it natively.
+//
+// When SIMULATE_TOOL_CALLS=false (native mode), the package passes tools
+// through unchanged and only handles response parsing for Qwen3 XML format.
 package toolsim
 
 import (
@@ -10,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 )
 
@@ -309,7 +313,50 @@ func injectSystemPrompt(messages []Message, sysPrompt string) []Message {
 func extractToolCalls(content string, tools []Tool) []parsedToolCall {
 	content = strings.TrimSpace(content)
 
-	// Strip markdown code fences if model wrapped the JSON.
+	// Step 0: Strip <think>...</think> — Qwen3 extended reasoning tags.
+	// These appear before the actual tool call output and must be removed
+	// before any format detection.
+	thinkRe := regexp.MustCompile(`(?s)<think>.*?</think>`)
+	content = thinkRe.ReplaceAllString(content, "")
+	content = strings.TrimSpace(content)
+
+	// Step 1: Parse Qwen3 native XML tool_call format.
+	// Qwen3 emits: <tool_call>{"name":"...","arguments":{...}}</tool_call>
+	// This is more reliable than prompt-injected JSON because the model was
+	// RLHF-trained on this exact format.
+	if strings.Contains(content, "<tool_call>") {
+		xmlRe := regexp.MustCompile(`(?s)<tool_call>(.*?)</tool_call>`)
+		matches := xmlRe.FindAllStringSubmatch(content, -1)
+		validNames := make(map[string]bool, len(tools))
+		for _, t := range tools {
+			validNames[t.Function.Name] = true
+		}
+		var xmlResult []parsedToolCall
+		for _, m := range matches {
+			inner := strings.TrimSpace(m[1])
+			var call struct {
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			}
+			if err := json.Unmarshal([]byte(inner), &call); err != nil {
+				continue
+			}
+			if !validNames[call.Name] {
+				continue
+			}
+			args := string(call.Arguments)
+			if args == "" || args == "null" {
+				args = "{}"
+			}
+			xmlResult = append(xmlResult, parsedToolCall{Name: call.Name, Arguments: args})
+		}
+		if len(xmlResult) > 0 {
+			slog.Info("toolsim: parsed tool calls from Qwen3 XML format", "count", len(xmlResult))
+			return xmlResult
+		}
+	}
+
+	// Step 2: Strip markdown code fences if model wrapped the JSON.
 	content = stripCodeFences(content)
 	content = strings.TrimSpace(content)
 

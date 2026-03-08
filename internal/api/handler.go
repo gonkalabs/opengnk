@@ -7,10 +7,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/gonkalabs/gonka-proxy-go/internal/sanitize"
+	"github.com/gonkalabs/gonka-proxy-go/internal/semcache"
 	"github.com/gonkalabs/gonka-proxy-go/internal/toolsim"
 	"github.com/gonkalabs/gonka-proxy-go/internal/upstream"
 )
@@ -20,6 +22,7 @@ type Handler struct {
 	client            *upstream.Client
 	simulateToolCalls bool
 	sanitizer         *sanitize.Sanitizer // nil when sanitization is disabled
+	cache             *semcache.Cache     // L1 exact-match response cache
 
 	mu     sync.RWMutex
 	models []json.RawMessage // cached raw model objects from upstream
@@ -28,10 +31,16 @@ type Handler struct {
 // New creates a Handler and kicks off initial model loading.
 // Pass a non-nil sanitizer to enable request/response sanitization.
 func New(client *upstream.Client, simulateToolCalls bool, san *sanitize.Sanitizer) *Handler {
+	cacheDir := os.Getenv("OPENGNK_CACHE_DIR")
+	if cacheDir == "" {
+		cacheDir = "data"
+	}
+	_ = os.MkdirAll(cacheDir, 0755)
 	h := &Handler{
 		client:            client,
 		simulateToolCalls: simulateToolCalls,
 		sanitizer:         san,
+		cache:             semcache.New(cacheDir+"/semcache.json", 0),
 	}
 	go h.loadModels()
 	return h
@@ -110,9 +119,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check if tool simulation is needed.
-	if h.simulateToolCalls && toolsim.NeedsSimulation(body) {
-		h.toolSimResponse(w, r, body, tm)
+	// Tool handling: simulation mode OR native passthrough with XML response parsing.
+	if toolsim.NeedsSimulation(body) {
+		if h.simulateToolCalls {
+			// Classic toolsim: rewrite prompt → send → parse JSON/XML response.
+			h.toolSimResponse(w, r, body, tm)
+		} else {
+			// Native mode: pass tools through to upstream (vLLM applies Qwen3
+			// chat template natively), then parse <tool_call> XML from response.
+			h.nativeToolResponse(w, r, body, tm)
+		}
 		return
 	}
 
@@ -179,12 +195,68 @@ func (h *Handler) toolSimResponse(w http.ResponseWriter, r *http.Request, body [
 	_, _ = w.Write(result)
 }
 
+// nativeToolResponse passes the request with tools directly to upstream
+// (letting vLLM apply the Qwen3 chat template natively), then parses
+// any <tool_call> XML or JSON in the response back into OpenAI format.
+func (h *Handler) nativeToolResponse(w http.ResponseWriter, r *http.Request, body []byte, tm *sanitize.TokenMap) {
+	// Extract tool list from original request for response parsing.
+	var peek struct {
+		Model string          `json:"model"`
+		Tools []toolsim.Tool  `json:"tools"`
+	}
+	_ = json.Unmarshal(body, &peek)
+
+	slog.Info("native tool call: passing through to upstream", "tools", len(peek.Tools))
+
+	respBody, status, err := h.client.Do(r.Context(), http.MethodPost, "/chat/completions", body)
+	if err != nil {
+		slog.Error("native tool upstream error", "err", err)
+		writeErr(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		return
+	}
+	if status >= 400 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(respBody)
+		return
+	}
+
+	// Parse <tool_call> XML or JSON tool calls from model response.
+	result := toolsim.ParseResponse(respBody, peek.Tools, peek.Model)
+
+	if h.sanitizer != nil && tm != nil {
+		result = h.sanitizer.RestoreBytes(result, tm)
+	}
+	setSanitizeHeader(w, tm)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(result)
+}
+
 func (h *Handler) nonStreamResponse(w http.ResponseWriter, r *http.Request, body []byte, tm *sanitize.TokenMap) {
+	// L1 cache lookup: exact match on messages hash.
+	if h.cache != nil {
+		if cached := h.cache.Lookup(body); cached != nil {
+			slog.Info("semcache: HIT")
+			setSanitizeHeader(w, tm)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Cache", "HIT")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(cached)
+			return
+		}
+	}
+
 	respBody, status, err := h.client.Do(r.Context(), http.MethodPost, "/chat/completions", body)
 	if err != nil {
 		slog.Error("upstream error", "err", err)
 		writeErr(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
+	}
+
+	// Store in L1 cache on success.
+	if h.cache != nil && status >= 200 && status < 300 {
+		h.cache.Store(body, respBody)
 	}
 
 	// Restore any redacted tokens before returning to the client.
@@ -194,6 +266,7 @@ func (h *Handler) nonStreamResponse(w http.ResponseWriter, r *http.Request, body
 
 	setSanitizeHeader(w, tm)
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Cache", "MISS")
 	w.WriteHeader(status)
 	_, _ = w.Write(respBody)
 }
