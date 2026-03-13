@@ -26,6 +26,7 @@ type Cfg struct {
 
 	// Features
 	SimulateToolCalls bool // rewrite tool-call requests into plain prompts + parse JSON back
+	NativeToolCalls   bool // forward tool_calls natively; normalizes array content for Gonka nodes
 
 	// Sanitization middleware
 	SanitizeEnabled bool // SANITIZE=true enables request/response redaction
@@ -69,6 +70,9 @@ func Load() (*Cfg, error) {
 	simTools := strings.TrimSpace(os.Getenv("SIMULATE_TOOL_CALLS"))
 	simulateToolCalls := simTools == "1" || strings.EqualFold(simTools, "true")
 
+	nativeTools := strings.TrimSpace(os.Getenv("NATIVE_TOOL_CALLS"))
+	nativeToolCalls := nativeTools == "1" || strings.EqualFold(nativeTools, "true")
+
 	port := strings.TrimSpace(os.Getenv("PORT"))
 	if port == "" {
 		port = "8080"
@@ -106,6 +110,7 @@ func Load() (*Cfg, error) {
 		Wallets:              wallets,
 		SourceURL:            sourceURL,
 		SimulateToolCalls:    simulateToolCalls,
+		NativeToolCalls:      nativeToolCalls,
 		SanitizeEnabled:      sanitizeEnabled,
 		SanitizeNER:          sanitizeNER,
 		SanitizeNERURL:       sanitizeNERURL,
