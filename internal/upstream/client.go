@@ -208,8 +208,12 @@ func (c *Client) Do(ctx context.Context, method, path string, payload []byte) ([
 
 // DoStream sends a signed request and returns the raw *http.Response for streaming.
 // It retries up to 3 times on different endpoints. The caller must close resp.Body.
+// If a 5xx response is received with the same error body on consecutive attempts the
+// error is deterministic (caused by the payload, not a transient node issue) and
+// retrying is stopped early to prevent retry storms and upstream rate limiting.
 func (c *Client) DoStream(ctx context.Context, method, path string, payload []byte) (*http.Response, error) {
 	var lastErr error
+	var lastErrBody string
 	tried := map[string]bool{}
 	for attempt := 0; attempt < 3; attempt++ {
 		ep, err := c.pickEndpointExcluding(tried)
@@ -224,9 +228,26 @@ func (c *Client) DoStream(ctx context.Context, method, path string, payload []by
 			lastErr = err
 			continue
 		}
+		if resp.StatusCode >= 500 {
+			errBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			bodyStr := string(errBody)
+			slog.Warn("upstream: stream got 5xx, checking if deterministic", "attempt", attempt+1, "status", resp.StatusCode, "body", bodyStr)
+			if attempt > 0 && bodyStr == lastErrBody {
+				// Same error body on consecutive attempts — payload is rejected; stop early.
+				slog.Error("upstream: deterministic 5xx detected, aborting retries", "status", resp.StatusCode, "body", bodyStr)
+				return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, bodyStr)
+			}
+			lastErrBody = bodyStr
+			lastErr = fmt.Errorf("upstream %d: %s", resp.StatusCode, bodyStr)
+			continue
+		}
 		return resp, nil
 	}
-	return nil, lastErr
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("upstream: all endpoints exhausted")
 }
 
 // doWith executes a signed request against a specific endpoint using the given wallet.

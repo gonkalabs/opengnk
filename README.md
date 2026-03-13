@@ -19,8 +19,8 @@ A lightweight, Docker-based proxy that exposes the [Gonka AI](https://gonka.ai) 
 
 ```bash
 # 1. Clone
-git clone https://github.com/gonkalabs/gonka-proxy-go.git
-cd gonka-proxy-go
+git clone https://github.com/gonkalabs/opengnk.git
+cd opengnk
 
 # 2. Configure
 cp .env.example .env
@@ -121,7 +121,8 @@ All configuration is via environment variables (loaded from `.env`):
 | `GONKA_PRIVATE_KEY` | No* | - | Hex-encoded secp256k1 private key (single wallet) |
 | `GONKA_ADDRESS` | No | Derived from key | Your bech32 account address (single wallet) |
 | `GONKA_SOURCE_URL` | No | `http://node2.gonka.ai:8000` | Genesis node for endpoint discovery |
-| `SIMULATE_TOOL_CALLS` | No | `false` | Enable tool/function-call simulation |
+| `SIMULATE_TOOL_CALLS` | No | `false` | Enable tool/function-call simulation (for nodes without native support) |
+| `NATIVE_TOOL_CALLS` | No | `false` | Forward tool calls natively; disables simulation and normalizes array content |
 | `PORT` | No | `8080` | HTTP server port |
 
 \* Either `GONKA_WALLETS` or `GONKA_PRIVATE_KEY` must be set. If both are set, `GONKA_WALLETS` takes priority.
@@ -299,19 +300,34 @@ SANITIZE_LLM=false
 
 ## Tool / function calling
 
-Not all Gonka inference nodes currently support the OpenAI tool-calling protocol natively (`--enable-auto-tool-choice` is not set for them during node deployment!). 
+The proxy supports two modes depending on whether your target Gonka node has native tool-calling enabled (`--enable-auto-tool-choice`).
 
-The proxy can simulate it.
+### Mode 1 — Native tool calls (recommended when supported)
 
-### Enable simulation
+Gonka now supports native tool calling on nodes deployed with `--enable-auto-tool-choice`. When the upstream node handles tools natively, enable this mode:
 
-Set `SIMULATE_TOOL_CALLS=true` in your `.env` and restart:
+```env
+NATIVE_TOOL_CALLS=true
+SIMULATE_TOOL_CALLS=false   # simulation is bypassed when native mode is on
+```
+
+The proxy forwards your `tools` and `tool_calls` fields unchanged and automatically flattens any OpenAI-style array content (`[{"type":"text","text":"..."}]`) to plain strings, which Gonka nodes require. All message types are normalized — including `role: "tool"` messages and messages with `tool_calls` — so the upstream never receives a mixed content format.
+
+### Mode 2 — Simulated tool calls (fallback for nodes without native support)
+
+Not all nodes are deployed with native tool-calling enabled. The proxy can simulate it instead:
+
+```env
+SIMULATE_TOOL_CALLS=true
+```
+
+Restart after changing either flag:
 
 ```bash
 make stop && make run
 ```
 
-### How it works
+### How simulation works
 
 1. Your app sends a standard OpenAI request with `tools` and `tool_choice`
 2. The proxy strips those fields (which upstream would reject) and injects a system prompt that describes the available tools and asks the model to respond with structured JSON
@@ -341,13 +357,13 @@ response = client.chat.completions.create(
     }],
 )
 
-# Works exactly like OpenAI:
+# Works exactly like OpenAI (both modes):
 tool_call = response.choices[0].message.tool_calls[0]
 print(tool_call.function.name)       # "get_weather"
 print(tool_call.function.arguments)  # '{"location": "Berlin"}'
 ```
 
-The full round-trip (ask -> tool call -> tool result -> final answer) works exactly as it does with OpenAI.
+The full round-trip (ask → tool call → tool result → final answer) works exactly as it does with OpenAI in both modes.
 
 ## Endpoints
 

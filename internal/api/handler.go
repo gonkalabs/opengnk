@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 type Handler struct {
 	client            *upstream.Client
 	simulateToolCalls bool
+	nativeToolCalls   bool
 	sanitizer         *sanitize.Sanitizer // nil when sanitization is disabled
 
 	mu     sync.RWMutex
@@ -27,10 +29,11 @@ type Handler struct {
 
 // New creates a Handler and kicks off initial model loading.
 // Pass a non-nil sanitizer to enable request/response sanitization.
-func New(client *upstream.Client, simulateToolCalls bool, san *sanitize.Sanitizer) *Handler {
+func New(client *upstream.Client, simulateToolCalls bool, nativeToolCalls bool, san *sanitize.Sanitizer) *Handler {
 	h := &Handler{
 		client:            client,
 		simulateToolCalls: simulateToolCalls,
+		nativeToolCalls:   nativeToolCalls,
 		sanitizer:         san,
 	}
 	go h.loadModels()
@@ -110,8 +113,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check if tool simulation is needed.
-	if h.simulateToolCalls && toolsim.NeedsSimulation(body) {
+	// Native tool calling: normalize array content so Gonka nodes receive plain strings.
+	// When enabled, tool_calls are forwarded as-is and simulation is skipped.
+	if h.nativeToolCalls {
+		var normErr error
+		body, normErr = normalizeMessageContent(body)
+		if normErr != nil {
+			slog.Warn("normalizeMessageContent failed, forwarding original body", "err", normErr)
+		}
+	} else if h.simulateToolCalls && toolsim.NeedsSimulation(body) {
+		// Check if tool simulation is needed.
 		h.toolSimResponse(w, r, body, tm)
 		return
 	}
@@ -305,4 +316,93 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// normalizeMessageContent flattens messages[].content from OpenAI array format
+// ([{"type":"text","text":"..."}]) to plain strings, which Gonka nodes require.
+// All messages are normalized — including those with tool_calls or role "tool" —
+// because the upstream rejects mixed content representations.
+// The tool_calls field itself is preserved unchanged.
+func normalizeMessageContent(body []byte) ([]byte, error) {
+	var req map[string]json.RawMessage
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body, err
+	}
+
+	msgsRaw, ok := req["messages"]
+	if !ok {
+		return body, nil
+	}
+
+	var messages []map[string]json.RawMessage
+	if err := json.Unmarshal(msgsRaw, &messages); err != nil {
+		return body, err
+	}
+
+	changed := false
+	for i, msg := range messages {
+		contentRaw, hasContent := msg["content"]
+		if !hasContent {
+			continue
+		}
+
+		// Already a string or null — nothing to do.
+		var s string
+		if json.Unmarshal(contentRaw, &s) == nil {
+			continue
+		}
+		var null *string
+		if json.Unmarshal(contentRaw, &null) == nil && null == nil {
+			continue
+		}
+
+		// Array content: flatten all text parts into a single string.
+		var parts []map[string]json.RawMessage
+		if err := json.Unmarshal(contentRaw, &parts); err != nil {
+			continue
+		}
+
+		var sb strings.Builder
+		for _, part := range parts {
+			typeRaw, hasType := part["type"]
+			if !hasType {
+				continue
+			}
+			var partType string
+			if json.Unmarshal(typeRaw, &partType) != nil || partType != "text" {
+				continue
+			}
+			textRaw, hasText := part["text"]
+			if !hasText {
+				continue
+			}
+			var text string
+			if json.Unmarshal(textRaw, &text) == nil {
+				sb.WriteString(text)
+			}
+		}
+
+		flat, err := json.Marshal(sb.String())
+		if err != nil {
+			continue
+		}
+		messages[i]["content"] = flat
+		changed = true
+	}
+
+	if !changed {
+		return body, nil
+	}
+
+	newMsgs, err := json.Marshal(messages)
+	if err != nil {
+		return body, err
+	}
+	req["messages"] = newMsgs
+
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body, err
+	}
+	return out, nil
 }

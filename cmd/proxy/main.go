@@ -82,7 +82,7 @@ func main() {
 		slog.Info("sanitization enabled", "classifiers", len(classifiers))
 	}
 
-	handler := api.New(client, cfg.SimulateToolCalls, san)
+	handler := api.New(client, cfg.SimulateToolCalls, cfg.NativeToolCalls, san)
 
 	qm := quality.New()
 
@@ -117,6 +117,7 @@ func main() {
 		"addr", cfg.ListenAddr,
 		"wallets", pool.Len(),
 		"toolSim", cfg.SimulateToolCalls,
+		"nativeToolCalls", cfg.NativeToolCalls,
 		"sanitize", cfg.SanitizeEnabled,
 	)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
