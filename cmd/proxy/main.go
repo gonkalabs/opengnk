@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -48,7 +49,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	client := upstream.New(cfg.SourceURL, pool)
+	client := upstream.New(cfg.SourceURL, pool, cfg.RetryStrategy, cfg.MaxRetries)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := client.DiscoverEndpoints(ctx); err != nil {
@@ -113,12 +114,18 @@ func main() {
 		}
 	}()
 
+	maxRetriesLabel := "unlimited"
+	if cfg.MaxRetries > 0 {
+		maxRetriesLabel = fmt.Sprintf("%d", cfg.MaxRetries)
+	}
 	slog.Info("starting proxy server",
 		"addr", cfg.ListenAddr,
 		"wallets", pool.Len(),
 		"toolSim", cfg.SimulateToolCalls,
 		"nativeToolCalls", cfg.NativeToolCalls,
 		"sanitize", cfg.SanitizeEnabled,
+		"retryStrategy", cfg.RetryStrategy,
+		"maxRetries", maxRetriesLabel,
 	)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server error", "err", err)

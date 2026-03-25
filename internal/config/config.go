@@ -3,9 +3,20 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
+)
+
+// RetryStrategy controls which node is used when retrying a failed request.
+type RetryStrategy string
+
+const (
+	// RetrySameNode retries the request on the same node that failed.
+	RetrySameNode RetryStrategy = "same_node"
+	// RetryOtherNodes picks a different node for each retry attempt.
+	RetryOtherNodes RetryStrategy = "other_nodes"
 )
 
 // WalletCfg holds the credentials for a single wallet.
@@ -40,6 +51,12 @@ type Cfg struct {
 	SanitizeLLMURL       string  // SANITIZE_LLM_URL=http://ollama:11434
 	SanitizeLLMModel     string  // SANITIZE_LLM_MODEL=qwen3:4b-instruct-2507-q4_K_M
 	SanitizeLLMThreshold float32 // SANITIZE_LLM_THRESHOLD=0 (0 = accept all)
+
+	// Retry behaviour for 429 / 5xx upstream errors.
+	// RetryStrategy controls whether to retry on the same node or rotate to others.
+	RetryStrategy RetryStrategy // "same_node" or "other_nodes" (default)
+	// MaxRetries is the maximum number of retry attempts (0 = unlimited).
+	MaxRetries int
 
 	// Server
 	ListenAddr string // e.g. :8080
@@ -106,6 +123,27 @@ func Load() (*Cfg, error) {
 		}
 	}
 
+	retryStrategy := RetryOtherNodes
+	if raw := strings.TrimSpace(os.Getenv("GONKA_RETRY_STRATEGY")); raw != "" {
+		switch strings.ToLower(raw) {
+		case "same_node", "same":
+			retryStrategy = RetrySameNode
+		case "other_nodes", "others":
+			retryStrategy = RetryOtherNodes
+		default:
+			return nil, fmt.Errorf("invalid GONKA_RETRY_STRATEGY %q: must be same_node or other_nodes", raw)
+		}
+	}
+
+	maxRetries := 0 // unlimited by default
+	if raw := strings.TrimSpace(os.Getenv("GONKA_MAX_RETRIES")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid GONKA_MAX_RETRIES %q: must be a non-negative integer", raw)
+		}
+		maxRetries = n
+	}
+
 	return &Cfg{
 		Wallets:              wallets,
 		SourceURL:            sourceURL,
@@ -118,6 +156,8 @@ func Load() (*Cfg, error) {
 		SanitizeLLMURL:       sanitizeLLMURL,
 		SanitizeLLMModel:     sanitizeLLMModel,
 		SanitizeLLMThreshold: sanitizeLLMThreshold,
+		RetryStrategy:        retryStrategy,
+		MaxRetries:           maxRetries,
 		ListenAddr:           ":" + port,
 	}, nil
 }

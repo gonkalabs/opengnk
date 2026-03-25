@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gonkalabs/gonka-proxy-go/internal/config"
 	"github.com/gonkalabs/gonka-proxy-go/internal/wallet"
 )
 
@@ -40,8 +41,10 @@ var allowedTransferAgents = map[string]bool{
 // each request to a random endpoint, using the next wallet from the
 // pool (round-robin) for signing.
 type Client struct {
-	sourceURL string
-	pool      *wallet.Pool
+	sourceURL     string
+	pool          *wallet.Pool
+	retryStrategy config.RetryStrategy
+	maxRetries    int // 0 = unlimited
 
 	mu        sync.RWMutex
 	endpoints []Endpoint
@@ -52,10 +55,12 @@ type Client struct {
 // New creates an upstream Client. sourceURL is a bare node URL
 // (e.g. http://node2.gonka.ai:8000) used to discover the participant list.
 // The wallet pool is used to round-robin requests across wallets.
-func New(sourceURL string, pool *wallet.Pool) *Client {
+func New(sourceURL string, pool *wallet.Pool, retryStrategy config.RetryStrategy, maxRetries int) *Client {
 	return &Client{
-		sourceURL: strings.TrimRight(sourceURL, "/"),
-		pool:      pool,
+		sourceURL:     strings.TrimRight(sourceURL, "/"),
+		pool:          pool,
+		retryStrategy: retryStrategy,
+		maxRetries:    maxRetries,
 		http: &http.Client{
 			Timeout: 120 * time.Second,
 			Transport: &http.Transport{
@@ -181,73 +186,154 @@ func (c *Client) FetchModels(ctx context.Context) ([]json.RawMessage, error) {
 	return result.Models, nil
 }
 
+// retryBackoff returns a sleep duration for the given attempt using exponential
+// backoff with jitter. For 429 responses with a Retry-After header the server's
+// requested delay is used as the base instead.
+func retryBackoff(attempt int, retryAfter string) time.Duration {
+	base := time.Duration(1<<min(attempt, 6)) * time.Second // 1s, 2s, 4s … 64s cap
+	if retryAfter != "" {
+		if secs, err := time.ParseDuration(retryAfter + "s"); err == nil && secs > base {
+			base = secs
+		}
+	}
+	jitter := time.Duration(rand.Int63n(int64(base/2 + 1)))
+	return base + jitter
+}
+
+// isRetryable returns true for status codes that should trigger a retry.
+func isRetryable(status int) bool {
+	return status == http.StatusTooManyRequests || status >= 500
+}
+
 // Do sends a signed non-streaming request and returns the full response body.
-// It retries up to 3 times on different endpoints if the request fails.
+// It retries on transport errors and 429/5xx responses, honouring the configured
+// retry strategy and max-retries limit (0 = unlimited).
 func (c *Client) Do(ctx context.Context, method, path string, payload []byte) ([]byte, int, error) {
 	var lastErr error
 	tried := map[string]bool{}
-	for attempt := 0; attempt < 3; attempt++ {
-		ep, err := c.pickEndpointExcluding(tried)
+	var lastEP *Endpoint
+
+	for attempt := 0; c.maxRetries == 0 || attempt <= c.maxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return nil, 0, ctx.Err()
+		}
+
+		ep, err := c.pickRetryEndpoint(tried, lastEP, attempt)
 		if err != nil {
-			break
+			return nil, 0, fmt.Errorf("no endpoints available: %w", lastErr)
 		}
 		tried[ep.Address] = true
+		lastEP = &ep
+
 		w := c.pool.Next()
 		resp, err := c.doWith(ctx, ep, w, method, path, payload)
 		if err != nil {
-			slog.Warn("upstream: request failed, retrying with different endpoint", "attempt", attempt+1, "err", err)
+			slog.Warn("upstream: request failed", "attempt", attempt+1, "endpoint", ep.URL, "err", err)
 			lastErr = err
+			c.sleepCtx(ctx, retryBackoff(attempt, ""))
 			continue
 		}
+
+		if isRetryable(resp.StatusCode) {
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			retryAfter := resp.Header.Get("Retry-After")
+			slog.Warn("upstream: retryable status", "attempt", attempt+1, "status", resp.StatusCode, "endpoint", ep.URL, "body", string(b))
+			lastErr = fmt.Errorf("upstream %d: %s", resp.StatusCode, string(b))
+			c.sleepCtx(ctx, retryBackoff(attempt, retryAfter))
+			continue
+		}
+
 		defer resp.Body.Close()
 		b, err := io.ReadAll(resp.Body)
 		return b, resp.StatusCode, err
 	}
-	return nil, 0, lastErr
+	return nil, 0, fmt.Errorf("upstream: max retries (%d) exhausted: %w", c.maxRetries, lastErr)
 }
 
 // DoStream sends a signed request and returns the raw *http.Response for streaming.
-// It retries up to 3 times on different endpoints. The caller must close resp.Body.
-// If a 5xx response is received with the same error body on consecutive attempts the
-// error is deterministic (caused by the payload, not a transient node issue) and
-// retrying is stopped early to prevent retry storms and upstream rate limiting.
+// The caller must close resp.Body.
+// It retries on transport errors and 429/5xx responses, honouring the configured
+// retry strategy and max-retries limit (0 = unlimited).
+// If two consecutive 5xx attempts return the same error body the error is treated
+// as deterministic (payload-caused) and retrying stops to prevent storms.
 func (c *Client) DoStream(ctx context.Context, method, path string, payload []byte) (*http.Response, error) {
 	var lastErr error
 	var lastErrBody string
 	tried := map[string]bool{}
-	for attempt := 0; attempt < 3; attempt++ {
-		ep, err := c.pickEndpointExcluding(tried)
+	var lastEP *Endpoint
+
+	for attempt := 0; c.maxRetries == 0 || attempt <= c.maxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		ep, err := c.pickRetryEndpoint(tried, lastEP, attempt)
 		if err != nil {
-			break
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, fmt.Errorf("no endpoints available")
 		}
 		tried[ep.Address] = true
+		lastEP = &ep
+
 		w := c.pool.Next()
 		resp, err := c.doWithNoTimeout(ctx, ep, w, method, path, payload)
 		if err != nil {
-			slog.Warn("upstream: stream request failed, retrying with different endpoint", "attempt", attempt+1, "err", err)
+			slog.Warn("upstream: stream request failed", "attempt", attempt+1, "endpoint", ep.URL, "err", err)
 			lastErr = err
+			c.sleepCtx(ctx, retryBackoff(attempt, ""))
 			continue
 		}
-		if resp.StatusCode >= 500 {
+
+		if isRetryable(resp.StatusCode) {
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			bodyStr := string(errBody)
-			slog.Warn("upstream: stream got 5xx, checking if deterministic", "attempt", attempt+1, "status", resp.StatusCode, "body", bodyStr)
-			if attempt > 0 && bodyStr == lastErrBody {
-				// Same error body on consecutive attempts — payload is rejected; stop early.
+			retryAfter := resp.Header.Get("Retry-After")
+
+			slog.Warn("upstream: stream retryable status", "attempt", attempt+1, "status", resp.StatusCode, "endpoint", ep.URL, "body", bodyStr)
+
+			if resp.StatusCode >= 500 && attempt > 0 && bodyStr == lastErrBody {
 				slog.Error("upstream: deterministic 5xx detected, aborting retries", "status", resp.StatusCode, "body", bodyStr)
 				return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, bodyStr)
 			}
 			lastErrBody = bodyStr
 			lastErr = fmt.Errorf("upstream %d: %s", resp.StatusCode, bodyStr)
+			c.sleepCtx(ctx, retryBackoff(attempt, retryAfter))
 			continue
 		}
+
 		return resp, nil
 	}
 	if lastErr != nil {
-		return nil, lastErr
+		return nil, fmt.Errorf("upstream: max retries (%d) exhausted: %w", c.maxRetries, lastErr)
 	}
 	return nil, fmt.Errorf("upstream: all endpoints exhausted")
+}
+
+// pickRetryEndpoint selects the next endpoint based on the retry strategy.
+// On the first attempt (attempt == 0) it always picks a random endpoint.
+// For subsequent attempts: same_node reuses lastEP; other_nodes excludes tried nodes.
+func (c *Client) pickRetryEndpoint(tried map[string]bool, lastEP *Endpoint, attempt int) (Endpoint, error) {
+	if attempt == 0 || lastEP == nil {
+		return c.pickEndpoint()
+	}
+	if c.retryStrategy == config.RetrySameNode {
+		return *lastEP, nil
+	}
+	return c.pickEndpointExcluding(tried)
+}
+
+// sleepCtx sleeps for the given duration or until the context is cancelled.
+func (c *Client) sleepCtx(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
 }
 
 // doWith executes a signed request against a specific endpoint using the given wallet.
