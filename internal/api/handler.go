@@ -325,6 +325,8 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 
 // normalizeMessageContent flattens messages[].content from OpenAI array format
 // ([{"type":"text","text":"..."}]) to plain strings, which Gonka nodes require.
+// It also converts assistant tool-call messages with blank string content to
+// null, matching OpenAI's wire format and avoiding Gonka's empty-content check.
 // All messages are normalized — including those with tool_calls or role "tool" —
 // because the upstream rejects mixed content representations.
 // The tool_calls field itself is preserved unchanged.
@@ -354,6 +356,10 @@ func normalizeMessageContent(body []byte) ([]byte, error) {
 		// Already a string or null — nothing to do.
 		var s string
 		if json.Unmarshal(contentRaw, &s) == nil {
+			if strings.TrimSpace(s) == "" && isAssistantToolCallMessage(msg) {
+				messages[i]["content"] = json.RawMessage("null")
+				changed = true
+			}
 			continue
 		}
 		var null *string
@@ -410,4 +416,19 @@ func normalizeMessageContent(body []byte) ([]byte, error) {
 		return body, err
 	}
 	return out, nil
+}
+
+func isAssistantToolCallMessage(msg map[string]json.RawMessage) bool {
+	var role string
+	if err := json.Unmarshal(msg["role"], &role); err != nil || role != "assistant" {
+		return false
+	}
+
+	toolCallsRaw, ok := msg["tool_calls"]
+	if !ok {
+		return false
+	}
+
+	var toolCalls []json.RawMessage
+	return json.Unmarshal(toolCallsRaw, &toolCalls) == nil && len(toolCalls) > 0
 }
