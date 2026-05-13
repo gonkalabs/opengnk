@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,27 @@ var allowedTransferAgents = map[string]bool{
 	"gonka10fynmy2npvdvew0vj2288gz8ljfvmjs35lat8n": true,
 	"gonka1v8gk5z7gcv72447yfcd2y8g78qk05yc4f3nk4w": true,
 	"gonka1gndhek2h2y5849wf6tmw6gnw9qn4vysgljed0u": true,
+}
+
+// inferenceHostRewriteTarget is the node4 gateway used for transfer-agent
+// inference traffic. Participant records still advertise individual node URLs,
+// but the live gateway fronts them while requests are signed for the original
+// transfer-agent address.
+const inferenceHostRewriteTarget = "https://node4.gonka.ai"
+
+// rewriteInferenceURL routes all discovered inference endpoints through node4.
+func rewriteInferenceURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	target, err := url.Parse(inferenceHostRewriteTarget)
+	if err != nil {
+		return raw
+	}
+	u.Scheme = target.Scheme
+	u.Host = target.Host
+	return u.String()
 }
 
 // Client talks to the upstream Gonka API with signed requests.
@@ -116,7 +138,9 @@ func (c *Client) DiscoverEndpoints(ctx context.Context) error {
 		if !allowedTransferAgents[p.Index] {
 			continue
 		}
-		url := strings.TrimRight(p.InferenceURL, "/") + "/v1"
+		baseURL := strings.TrimRight(p.InferenceURL, "/")
+		baseURL = rewriteInferenceURL(baseURL)
+		url := baseURL + "/v1"
 		eps = append(eps, Endpoint{URL: url, Address: p.Index})
 	}
 

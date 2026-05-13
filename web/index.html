@@ -182,6 +182,17 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+function errText(v) {
+  if (!v) return 'request failed';
+  if (typeof v === 'string') return v;
+  if (typeof v.error === 'string') return v.error;
+  if (v.error) return errText(v.error);
+  if (typeof v.detail === 'string') return v.detail;
+  if (v.detail) return errText(v.detail);
+  if (typeof v.message === 'string') return v.message;
+  try { return JSON.stringify(v); } catch (_) { return String(v); }
+}
+
 // ── models ─────────────────────────────────────────────────────────────────
 (async () => {
   try {
@@ -413,7 +424,7 @@ async function send() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error||e.detail||res.status); }
+      if (!res.ok) { const e = await res.json().catch(()=>({ error: res.statusText || res.status })); throw new Error(errText(e)); }
 
       const redactions = parseRedactions(res.headers);
 
@@ -441,7 +452,11 @@ async function send() {
         for (const l of lines) {
           if (!l.startsWith('data: ')) continue;
           const d = l.slice(6); if (d === '[DONE]') continue;
-          try { const j = JSON.parse(d); const c = j.choices?.[0]?.delta?.content; if(c){full+=c;bubble.textContent=full;} } catch(_){}
+          let j;
+          try { j = JSON.parse(d); } catch(_) { continue; }
+          if (j.error) throw new Error(errText(j));
+          const c = j.choices?.[0]?.delta?.content;
+          if(c){full+=c;bubble.textContent=full;}
         }
         log.scrollTop = log.scrollHeight;
       }
@@ -464,7 +479,7 @@ async function send() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error||e.detail||res.status); }
+      if (!res.ok) { const e = await res.json().catch(()=>({ error: res.statusText || res.status })); throw new Error(errText(e)); }
 
       const redactions = parseRedactions(res.headers);
 
@@ -487,7 +502,7 @@ async function send() {
       const restoreWidget = buildRestorePanel(redactions);
       if (restoreWidget) botEntry.appendChild(restoreWidget);
     }
-  } catch(e) { addErr(e.message || 'request failed'); }
+  } catch(e) { addErr(errText(e)); }
 
   go_.disabled = false;
   inp.focus();
