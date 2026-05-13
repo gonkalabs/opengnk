@@ -82,12 +82,17 @@ func (h *Handler) listModels(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	if len(entries) == 0 {
-		entries = []modelEntry{{
-			ID:      "gonka-model",
-			Object:  "model",
-			Created: 1677610602,
-			OwnedBy: "gonka",
-		}}
+		for _, id := range []string{
+			"Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
+			"moonshotai/Kimi-K2.6",
+		} {
+			entries = append(entries, modelEntry{
+				ID:      id,
+				Object:  "model",
+				Created: 1677610602,
+				OwnedBy: "gonka",
+			})
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

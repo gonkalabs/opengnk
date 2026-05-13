@@ -1,5 +1,6 @@
 .env
 /proxy
+minimal-py/
 *.exe
 tmp/
 .idea/

@@ -79,10 +79,16 @@ func Load() (*Cfg, error) {
 		sourceURL = strings.TrimSpace(os.Getenv("GONKA_ENDPOINT"))
 	}
 	if sourceURL == "" {
-		sourceURL = "http://node2.gonka.ai:8000"
+		sourceURL = "https://node4.gonka.ai"
 	}
 	sourceURL = strings.TrimRight(sourceURL, "/")
 	sourceURL = strings.TrimSuffix(sourceURL, "/v1")
+	// node4 exposes the public gateway over HTTPS; :8000 hangs for discovery.
+	if strings.EqualFold(sourceURL, "http://node4.gonka.ai:8000") ||
+		strings.EqualFold(sourceURL, "http://node4.gonka.ai") ||
+		strings.EqualFold(sourceURL, "https://node4.gonka.ai:8000") {
+		sourceURL = "https://node4.gonka.ai"
+	}
 
 	simTools := strings.TrimSpace(os.Getenv("SIMULATE_TOOL_CALLS"))
 	simulateToolCalls := simTools == "1" || strings.EqualFold(simTools, "true")

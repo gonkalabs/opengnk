@@ -2,7 +2,7 @@
 
 A lightweight, Docker-based proxy that exposes the [Gonka AI](https://gonka.ai) decentralised inference network as a standard **OpenAI-compatible API**. Point any app that speaks the OpenAI protocol at this proxy and it just works - no SDK changes required.
 
-(with Gonka network's Transfer Agent feature (v0.2.9+) applied!)
+(with Gonka network's Transfer Agent feature (v0.2.9+) and v0.2.12 DevShards update applied!)
 
 ## Features
 
@@ -120,7 +120,7 @@ All configuration is via environment variables (loaded from `.env`):
 | `GONKA_WALLETS` | No* | - | Comma-separated `privkey:address` pairs for multiple wallets (see below) |
 | `GONKA_PRIVATE_KEY` | No* | - | Hex-encoded secp256k1 private key (single wallet) |
 | `GONKA_ADDRESS` | No | Derived from key | Your bech32 account address (single wallet) |
-| `GONKA_SOURCE_URL` | No | `http://node2.gonka.ai:8000` | Genesis node for endpoint discovery |
+| `GONKA_SOURCE_URL` | No | `https://node4.gonka.ai` | Node4 gateway for endpoint discovery |
 | `SIMULATE_TOOL_CALLS` | No | `false` | Enable tool/function-call simulation (for nodes without native support) |
 | `NATIVE_TOOL_CALLS` | No | `false` | Forward tool calls natively; disables simulation and normalizes array content |
 | `PORT` | No | `8080` | HTTP server port |
@@ -171,6 +171,16 @@ gonka1gndhek2h2y5849wf6tmw6gnw9qn4vysgljed0u
 ```
 
 Requests sent to non-whitelisted nodes will be rejected with `Transfer Agent not allowed`. The proxy handles this automatically - you don't need to pick nodes manually. If the whitelist changes in a future Gonka update, edit the `allowedTransferAgents` map in `internal/upstream/client.go`.
+
+### DevShards node4 gateway
+
+After the DevShards update, local OpenGNK uses node4 as the public gateway:
+
+```env
+GONKA_SOURCE_URL=https://node4.gonka.ai
+```
+
+Do not use `http://node4.gonka.ai:8000` for local discovery; that endpoint can hang. The proxy discovers whitelisted transfer-agent addresses from node4, then routes inference traffic through `https://node4.gonka.ai/v1` while still signing each request for the selected transfer-agent address.
 
 ## Using as an OpenAI drop-in
 
