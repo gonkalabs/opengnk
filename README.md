@@ -4,28 +4,33 @@ A lightweight, Docker-based proxy that exposes the [Gonka AI](https://gonka.ai) 
 
 ## How it works
 
-The Gonka network uses **DevShards** — on-chain escrows that fund inference against AI models. The proxy connects to a devshard gateway (either an external one or a self-hosted one) and routes your OpenAI-format requests through it. The gateway manages escrow creation, capacity routing, and proof-of-compute settlement internally.
+The Gonka network uses **DevShards** — on-chain escrows that fund inference against AI models. The proxy connects to a devshard gateway and routes your OpenAI-format requests through it. The gateway manages escrow creation, capacity routing, and proof-of-compute settlement internally.
 
-**Direct escrow operations** (creating and managing your own escrows) require a **whitelisted wallet**. If your wallet is not whitelisted, you can connect to an external devshard operator instead — the proxy supports both modes.
+**Two ways to access devshards:**
 
-## Quick start (devshard mode)
+- **Your wallet IS whitelisted** → You can run your own devshard gateway and create escrows directly (`devshard-embedded` mode). This gives you full autonomy and control over your escrows.
 
-### Option A — Connect to an external gateway (simplest)
+- **Your wallet is NOT whitelisted** → You cannot create escrows directly. Instead, use **[OpenBroker](https://openbroker.gonka.gg)** — Gonka Labs' public broker service that lets anyone route inference through Gonka Labs' whitelisted devshards. Go to [openbroker.gonka.gg](https://openbroker.gonka.gg), sign up, issue an API key, and configure OpenGNK to route through it (`devshard` mode). See [openbroker.gonka.gg/docs](https://openbroker.gonka.gg/docs) for details.
+
+## Quick start
+
+### Option A — Connect to OpenBroker (simplest, no whitelisted wallet needed)
+
+1. Go to **[openbroker.gonka.gg](https://openbroker.gonka.gg)**, create an account, and issue an API key.
+
+2. Clone and configure:
 
 ```bash
-# 1. Clone
 git clone https://github.com/gonkalabs/opengnk.git
 cd opengnk
-
-# 2. Configure
 cp .env.example .env
 ```
 
 Edit `.env`:
 ```env
 GONKA_UPSTREAM_MODE=devshard
-GATEWAY_URL=https://your-gateway.example.com/v1
-GATEWAY_API_KEY=sk-your-api-key
+GATEWAY_URL=https://openbroker.gonka.gg/v1
+GATEWAY_API_KEY=obk-your-openbroker-key
 ```
 
 ```bash
@@ -73,15 +78,17 @@ The proxy supports three modes, selected via `GONKA_UPSTREAM_MODE` in your `.env
 | **`devshard-embedded`** | Bundled devshard-gateway container with own escrows | You have a whitelisted wallet and want full autonomy |
 | **`node`** | Legacy ECDSA-signed requests directly to Gonka nodes | ⚠️ **Deprecated.** The old direct-node flow is being phased out. Use devshard modes instead. |
 
-### `devshard` — connect to an external gateway
+### `devshard` — connect to an external gateway / OpenBroker
 
-No wallets, no signing, no escrow management. Just an API key against a gateway that handles everything.
+No wallets, no signing, no escrow management. Just an API key against a gateway that handles everything. The easiest option is **[OpenBroker](https://openbroker.gonka.gg)** — Gonka Labs' public broker that routes inference through whitelisted devshards. This is the recommended path for users without a whitelisted wallet.
 
 ```env
 GONKA_UPSTREAM_MODE=devshard
-GATEWAY_URL=http://your-devshard-gateway:8080/v1
-GATEWAY_API_KEY=sk-your-gateway-key
+GATEWAY_URL=https://openbroker.gonka.gg/v1
+GATEWAY_API_KEY=obk-your-openbroker-key
 ```
+
+You can also point this at any other devshard gateway you have access to.
 
 ### `devshard-embedded` — self-hosted gateway
 
