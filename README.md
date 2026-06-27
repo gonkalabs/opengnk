@@ -1,21 +1,16 @@
-# Gonka Proxy
+# OpenGNK — Gonka AI Proxy
 
-A lightweight, Docker-based proxy that exposes the [Gonka AI](https://gonka.ai) decentralised inference network as a standard **OpenAI-compatible API**. Point any app that speaks the OpenAI protocol at this proxy and it just works - no SDK changes required.
+A lightweight, Docker-based proxy that exposes the [Gonka AI](https://gonka.ai) decentralised inference network as a standard **OpenAI-compatible API**. Point any app that speaks the OpenAI protocol at this proxy and it just works — no SDK changes required.
 
-(with Gonka network's Transfer Agent feature (v0.2.9+) and v0.2.12 DevShards update applied!)
+## How it works
 
-## Features
+The Gonka network uses **DevShards** — on-chain escrows that fund inference against AI models. The proxy connects to a devshard gateway (either an external one or a self-hosted one) and routes your OpenAI-format requests through it. The gateway manages escrow creation, capacity routing, and proof-of-compute settlement internally.
 
-- **OpenAI-compatible REST API** - `/v1/models`, `/v1/chat/completions` (streaming and non-streaming)
-- **Multi-wallet support** - configure multiple wallets and the proxy round-robins requests across them, spreading rate limits and increasing throughput
-- **Automatic endpoint discovery** - fetches the active participant list from the Gonka network and routes requests to healthy, whitelisted nodes
-- **Transparent request signing** - ECDSA / secp256k1 signatures are added to every upstream request; your private keys never leave the proxy
-- **Tool / function-call simulation** - rewrites tool-call requests into plain prompts and converts the model's JSON back into proper `tool_calls` responses, so tool calling works even though upstream nodes don't support it natively
-- **Privacy sanitization** - strips sensitive data (names, emails, API keys, credentials) from messages before forwarding and restores them in the response; the upstream LLM never sees your real data ([details](docs/sanitization.md))
-- **Zero host dependencies** - runs entirely in Docker; no local Go installation needed
-- **Built-in web chat UI** at `http://localhost:8080`
+**Direct escrow operations** (creating and managing your own escrows) require a **whitelisted wallet**. If your wallet is not whitelisted, you can connect to an external devshard operator instead — the proxy supports both modes.
 
-## Quick start
+## Quick start (devshard mode)
+
+### Option A — Connect to an external gateway (simplest)
 
 ```bash
 # 1. Clone
@@ -24,16 +19,44 @@ cd opengnk
 
 # 2. Configure
 cp .env.example .env
-# Edit .env with your credentials (see "Obtaining a key" below)
+```
 
+Edit `.env`:
+```env
+GONKA_UPSTREAM_MODE=devshard
+GATEWAY_URL=https://your-gateway.example.com/v1
+GATEWAY_API_KEY=sk-your-api-key
+```
+
+```bash
 # 3. Run
 make run          # or: docker compose up -d
+```
 
-# 4. Try it
+### Option B — Self-hosted gateway (fully self-contained)
+
+Requires a funded Gonka wallet for escrow creation.
+
+```env
+GONKA_UPSTREAM_MODE=devshard-embedded
+GATEWAY_API_KEY=sk-your-api-key
+DEVSHARD_PRIVATE_KEY=your_hex_private_key
+DEVSHARD_TARGETS=MiniMaxAI/MiniMax-M2.7=6
+```
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.devshard.yml up -d
+```
+
+This launches a devshard-gateway container alongside the proxy. The gateway creates and manages its own escrows on-chain.
+
+### Try it
+
+```bash
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
+    "model": "MiniMaxAI/MiniMax-M2.7",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
@@ -42,21 +65,17 @@ The web UI is available at **http://localhost:8080**.
 
 ## Upstream modes
 
-The proxy supports three modes for talking to the Gonka network. Set `GONKA_UPSTREAM_MODE` in your `.env`.
+The proxy supports three modes, selected via `GONKA_UPSTREAM_MODE` in your `.env`:
 
-### `node` (default — legacy ECDSA)
+| Mode | Description | Use when |
+|---|---|---|
+| **`devshard`** | Bearer-token client to an external devshard gateway | You have a gateway API key (simplest setup) |
+| **`devshard-embedded`** | Bundled devshard-gateway container with own escrows | You have a whitelisted wallet and want full autonomy |
+| **`node`** | Legacy ECDSA-signed requests directly to Gonka nodes | ⚠️ **Deprecated.** The old direct-node flow is being phased out. Use devshard modes instead. |
 
-Signs each request with ECDSA and sends it directly to Gonka network nodes. Requires a Gonka wallet (private key). This is the original mode.
+### `devshard` — connect to an external gateway
 
-```env
-GONKA_UPSTREAM_MODE=node
-GONKA_PRIVATE_KEY=your_hex_key
-GONKA_SOURCE_URL=http://node1.gonka.ai:8000
-```
-
-### `devshard` (connect to an external gateway)
-
-Connects to a devshard gateway via a simple API key (Bearer auth). No wallets, no signing — the gateway manages escrows and routing internally. This is the simplest way to use devshards.
+No wallets, no signing, no escrow management. Just an API key against a gateway that handles everything.
 
 ```env
 GONKA_UPSTREAM_MODE=devshard
@@ -64,163 +83,56 @@ GATEWAY_URL=http://your-devshard-gateway:8080/v1
 GATEWAY_API_KEY=sk-your-gateway-key
 ```
 
-### `devshard-embedded` (self-contained with bundled gateway)
+### `devshard-embedded` — self-hosted gateway
 
-Bundles a devshard-gateway container alongside the proxy — fully self-contained. The gateway creates and manages its own escrows. Requires a Gonka private key for escrow creation.
+Bundles a devshard-gateway container. Requires a Gonka private key for escrow creation and a funded wallet.
 
 ```env
 GONKA_UPSTREAM_MODE=devshard-embedded
 GATEWAY_API_KEY=sk-your-gateway-key
 DEVSHARD_PRIVATE_KEY=your_hex_key
 DEVSHARD_TARGETS=MiniMaxAI/MiniMax-M2.7=6
+DEVSHARD_ESCROW_AMOUNT_NGONKA=1500000000
 ```
 
 ```bash
-# Run with the devshard compose overlay:
 docker compose -f docker-compose.yml -f docker-compose.devshard.yml up -d
 ```
 
-## Obtaining a key
+Config options for embedded mode:
 
-You need a Gonka account (private key + address) to sign inference requests.
+| Variable | Default | Description |
+|---|---|---|
+| `DEVSHARD_IMAGE` | `ghcr.io/gonka-ai/devshard-gateway:mainnet-v0.2.13-latest` | Gateway container image |
+| `DEVSHARD_PRIVATE_KEY` | — | Hex private key for escrow creation (required) |
+| `DEVSHARD_TARGETS` | `MiniMaxAI/MiniMax-M2.7=6` | Comma-separated `model_id=count` pairs |
+| `DEVSHARD_ESCROW_AMOUNT_NGONKA` | `1500000000` (1.5 GNK) | Escrow deposit per devshard |
+| `DEVSHARD_CHAIN_REST` | `http://204.12.168.157:1317` | Chain REST API URL |
+| `DEVSHARD_PUBLIC_API` | `https://node3.gonka.ai` | Public API for epoch/PoC phase checks |
 
-### 1. Download the CLI
+### `node` — legacy ECDSA mode (deprecated)
 
-Download the latest `inferenced` binary for your system from the [Gonka docs](https://gonka.ai/developer/quickstart/).
+> ⚠️ The direct ECDSA node-signing flow is being phased out in favor of devshards. New deployments should use `devshard` or `devshard-embedded` mode.
 
-On macOS, grant execution permission and allow it in System Settings > Privacy & Security:
-
-```bash
-chmod +x inferenced
-```
-
-### 2. Create an account
-
-Pick any genesis node as the `NODE_URL`:
-
-```
-http://node1.gonka.ai:8000
-http://node2.gonka.ai:8000
-http://node3.gonka.ai:8000
-```
-
-Then run:
-
-```bash
-export ACCOUNT_NAME=my-gonka-account
-export NODE_URL=http://node1.gonka.ai:8000
-
-./inferenced create-client $ACCOUNT_NAME --node-address $NODE_URL
-```
-
-This generates a keypair, saves it locally, and **registers the account on-chain**. You'll see output like:
-
-```
-- address: gonka1abc123...
-  name: my-gonka-account
-  pubkey: '{"@type":"...","key":"..."}'
-  type: local
-```
-
-**Save the mnemonic phrase securely** - it's the only way to recover the account.
-
-### 3. Export the private key
-
-```bash
-./inferenced keys export $ACCOUNT_NAME --unarmored-hex --unsafe
-```
-
-This prints a 64-character hex string. Add it to your `.env`:
+Signs each request with ECDSA and sends it to Gonka network nodes. Requires a Gonka wallet.
 
 ```env
-GONKA_PRIVATE_KEY=<hex key from above>
-GONKA_ADDRESS=gonka1abc123...
+GONKA_UPSTREAM_MODE=node
+GONKA_PRIVATE_KEY=your_hex_key
+GONKA_SOURCE_URL=http://node1.gonka.ai:8000
 ```
 
-### 4. Fund the account
+See the [legacy setup guide](#legacy-node-mode-setup) below for wallet creation instructions.
 
-You need GNK tokens to pay for inference. Transfer tokens to your `GONKA_ADDRESS` via the [Gonka.gg Faucet](https://gonka.gg/faucet) (0.01GNK per 24H) 
+## Features
 
-...or fund your wallet from another funded account:
-
-```bash
-./inferenced tx bank send <funded-account-name> <your-address> 5000000ngonka \
-  --node $NODE_URL/chain-rpc/ \
-  --chain-id gonka-mainnet \
-  --fees 500ngonka \
-  --keyring-backend os -y
-```
-
-## Configuration
-
-All configuration is via environment variables (loaded from `.env`):
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `GONKA_WALLETS` | No* | - | Comma-separated `privkey:address` pairs for multiple wallets (see below) |
-| `GONKA_PRIVATE_KEY` | No* | - | Hex-encoded secp256k1 private key (single wallet) |
-| `GONKA_ADDRESS` | No | Derived from key | Your bech32 account address (single wallet) |
-| `GONKA_SOURCE_URL` | No | `https://node4.gonka.ai` | Node4 gateway for endpoint discovery |
-| `SIMULATE_TOOL_CALLS` | No | `false` | Enable tool/function-call simulation (for nodes without native support) |
-| `NATIVE_TOOL_CALLS` | No | `false` | Forward tool calls natively; disables simulation and normalizes array content |
-| `PORT` | No | `8080` | HTTP server port |
-
-\* Either `GONKA_WALLETS` or `GONKA_PRIVATE_KEY` must be set. If both are set, `GONKA_WALLETS` takes priority.
-
-### Multiple wallets
-
-You can configure multiple wallets to spread requests across them in round-robin order. This helps avoid per-wallet rate limits and increases overall throughput.
-
-Set `GONKA_WALLETS` as a comma-separated list of `private_key:address` pairs:
-
-```env
-GONKA_WALLETS=privkey1:gonka1addr1,privkey2:gonka1addr2,privkey3:gonka1addr3
-```
-
-The address part is optional - if omitted, just list the private keys:
-
-```env
-GONKA_WALLETS=privkey1,privkey2,privkey3
-```
-
-Each incoming request cycles to the next wallet. The proxy logs which wallet was used for every upstream request so you can verify the distribution.
-
-For a single wallet, you can use either format:
-
-```env
-# Option A: multi-wallet format (one entry)
-GONKA_WALLETS=your_private_key:gonka1youraddress
-
-# Option B: legacy format (backward compatible)
-GONKA_PRIVATE_KEY=your_private_key
-GONKA_ADDRESS=gonka1youraddress
-```
-
-## NOTE about TransferAgent (Whitelisted inference nodes)
-
-The Gonka network's Transfer Agent feature (v0.2.9+) restricts which nodes can process proxied inference requests. The proxy automatically discovers active participants and filters them to this whitelist:
-
-```
-gonka1y2a9p56kv044327uycmqdexl7zs82fs5ryv5le
-gonka1dkl4mah5erqggvhqkpc8j3qs5tyuetgdy552cp
-gonka1kx9mca3xm8u8ypzfuhmxey66u0ufxhs7nm6wc5
-gonka1ddswmmmn38esxegjf6qw36mt4aqyw6etvysy5x
-gonka10fynmy2npvdvew0vj2288gz8ljfvmjs35lat8n
-gonka1v8gk5z7gcv72447yfcd2y8g78qk05yc4f3nk4w
-gonka1gndhek2h2y5849wf6tmw6gnw9qn4vysgljed0u
-```
-
-Requests sent to non-whitelisted nodes will be rejected with `Transfer Agent not allowed`. The proxy handles this automatically - you don't need to pick nodes manually. If the whitelist changes in a future Gonka update, edit the `allowedTransferAgents` map in `internal/upstream/client.go`.
-
-### DevShards node4 gateway
-
-After the DevShards update, local OpenGNK uses node4 as the public gateway:
-
-```env
-GONKA_SOURCE_URL=https://node4.gonka.ai
-```
-
-Do not use `http://node4.gonka.ai:8000` for local discovery; that endpoint can hang. The proxy discovers whitelisted transfer-agent addresses from node4, then routes inference traffic through `https://node4.gonka.ai/v1` while still signing each request for the selected transfer-agent address.
+- **OpenAI-compatible REST API** — `/v1/models`, `/v1/chat/completions` (streaming and non-streaming)
+- **DevShard support** — connect to a devshard gateway via API key or run your own embedded gateway
+- **Tool / function-call simulation** — rewrites tool-call requests into plain prompts and converts responses back, so tool calling works even when upstream doesn't support it natively
+- **Native tool calling** — forward `tool_calls` to nodes that support it
+- **Privacy sanitization** — strips sensitive data (names, emails, API keys, credentials) from messages before forwarding and restores them in the response; the upstream LLM never sees your real data ([details](docs/sanitization.md))
+- **Zero host dependencies** — runs entirely in Docker; no local Go installation needed
+- **Built-in web chat UI** at `http://localhost:8080`
 
 ## Using as an OpenAI drop-in
 
@@ -237,7 +149,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
+    model="MiniMaxAI/MiniMax-M2.7",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(response.choices[0].message.content)
@@ -254,7 +166,7 @@ const client = new OpenAI({
 });
 
 const response = await client.chat.completions.create({
-  model: "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
+  model: "MiniMaxAI/MiniMax-M2.7",
   messages: [{ role: "user", content: "Hello!" }],
 });
 console.log(response.choices[0].message.content);
@@ -266,12 +178,12 @@ console.log(response.choices[0].message.content);
 # Non-streaming
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"Qwen/Qwen3-235B-A22B-Instruct-2507-FP8","messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"MiniMaxAI/MiniMax-M2.7","messages":[{"role":"user","content":"Hello!"}]}'
 
 # Streaming
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"Qwen/Qwen3-235B-A22B-Instruct-2507-FP8","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+  -d '{"model":"MiniMaxAI/MiniMax-M2.7","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
 ```
 
 ## Privacy sanitization
@@ -287,133 +199,40 @@ The proxy can automatically strip sensitive data from messages before they leave
 - Credit card numbers and IBANs
 - Anything else a local LLM classifier flags as sensitive
 
-### How it works
-
-1. Your message arrives at the proxy
-2. Classifiers scan the text and replace sensitive values with stable placeholders
-3. The redacted message is forwarded to the upstream LLM
-4. When the response comes back, placeholders are swapped back to the originals
-5. The web UI shows you a side-by-side diff of what you typed vs. what was sent
-
 ### Setup
 
-Sanitization runs as an optional Docker profile. Start it alongside the proxy:
+Sanitization runs as an optional Docker profile:
 
 ```bash
 docker compose --profile sanitize up -d
 ```
 
-This starts three extra containers:
-- `sanitize-ner` - NER model (Natasha for Russian, spaCy for English), handles names and organisations
-- `ollama` - runs the local LLM classifier
-- `ollama-init` - pulls the model on first run, then exits
-
-The first start downloads the LLM model (~2.6 GB). Subsequent starts are instant since the model is cached in a Docker volume.
-
-### Configuration
-
-Set these in your `.env`:
+Configure in `.env`:
 
 ```env
-# Enable sanitization
 SANITIZE=true
-
-# NER sidecar - catches names, orgs, locations
 SANITIZE_NER=true
-SANITIZE_NER_URL=http://sanitize-ner:8001
-
-# Local LLM - catches API keys, passwords, and other credentials
 SANITIZE_LLM=true
-SANITIZE_LLM_URL=http://ollama:11434
-SANITIZE_LLM_MODEL=qwen3:4b-instruct-2507-q4_K_M
 ```
 
-### Web UI
-
-The built-in chat UI at `http://localhost:8080` shows exactly what happened to each message:
-
-- A yellow shield badge shows how many values were redacted
-- Click it to expand a side-by-side view: your original message on the left, what was sent to the LLM on the right
-- Sensitive values are highlighted in the original; placeholders are shown in the sent version
-- A green badge under the assistant response shows which placeholders were restored
-
-### Hardware requirements
-
-The LLM classifier runs on CPU. Inference takes roughly 5-20 seconds per message depending on message length and hardware. The NER sidecar is much faster (under 100ms). Both run in parallel so total latency is dominated by whichever takes longer.
-
-If latency is a concern, you can disable the LLM layer and rely only on NER:
-
-```env
-SANITIZE_NER=true
-SANITIZE_LLM=false
-```
+See [docs/sanitization.md](docs/sanitization.md) for full details.
 
 ## Tool / function calling
 
-The proxy supports two modes depending on whether your target Gonka node has native tool-calling enabled (`--enable-auto-tool-choice`).
-
-### Mode 1 — Native tool calls (recommended when supported)
-
-Gonka now supports native tool calling on nodes deployed with `--enable-auto-tool-choice`. When the upstream node handles tools natively, enable this mode:
+### Native tool calls (recommended when supported)
 
 ```env
 NATIVE_TOOL_CALLS=true
-SIMULATE_TOOL_CALLS=false   # simulation is bypassed when native mode is on
+SIMULATE_TOOL_CALLS=false
 ```
 
-The proxy forwards your `tools` and `tool_calls` fields unchanged and automatically flattens any OpenAI-style array content (`[{"type":"text","text":"..."}]`) to plain strings, which Gonka nodes require. All message types are normalized — including `role: "tool"` messages and messages with `tool_calls` — so the upstream never receives a mixed content format.
-
-### Mode 2 — Simulated tool calls (fallback for nodes without native support)
-
-Not all nodes are deployed with native tool-calling enabled. The proxy can simulate it instead:
+### Simulated tool calls (fallback)
 
 ```env
 SIMULATE_TOOL_CALLS=true
 ```
 
-Restart after changing either flag:
-
-```bash
-make stop && make run
-```
-
-### How simulation works
-
-1. Your app sends a standard OpenAI request with `tools` and `tool_choice`
-2. The proxy strips those fields (which upstream would reject) and injects a system prompt that describes the available tools and asks the model to respond with structured JSON
-3. The model returns a JSON array of tool calls
-4. The proxy parses the JSON and converts it back into the standard OpenAI `tool_calls` response format (`finish_reason: "tool_calls"`, `content: null`, structured `tool_calls` array)
-5. Your app sees a perfectly standard response and handles the tool-call round-trip as usual
-
-### Example
-
-```python
-response = client.chat.completions.create(
-    model="Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
-    messages=[{"role": "user", "content": "What's the weather in Berlin?"}],
-    tools=[{
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the current weather for a location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string"}
-                },
-                "required": ["location"]
-            }
-        }
-    }],
-)
-
-# Works exactly like OpenAI (both modes):
-tool_call = response.choices[0].message.tool_calls[0]
-print(tool_call.function.name)       # "get_weather"
-print(tool_call.function.arguments)  # '{"location": "Berlin"}'
-```
-
-The full round-trip (ask → tool call → tool result → final answer) works exactly as it does with OpenAI in both modes.
+The proxy strips `tools`/`tool_choice`, injects a system prompt instructing the model to emit JSON, and converts the response back into proper `tool_calls` format. Your app sees a standard OpenAI response.
 
 ## Endpoints
 
@@ -423,6 +242,7 @@ The full round-trip (ask → tool call → tool result → final answer) works e
 | `GET` | `/v1/models` | List available models |
 | `POST` | `/v1/chat/completions` | Chat completions (streaming & non-streaming) |
 | `GET` | `/` | Web chat UI |
+| `GET` | `/quality/stats` | Request quality metrics |
 
 ## Make commands
 
@@ -435,27 +255,88 @@ make dev     # Build + run in foreground (for development)
 make clean   # Stop + remove images and volumes
 ```
 
+## Legacy node-mode setup
+
+> ⚠️ This section is for the deprecated ECDSA `node` mode only. New users should use `devshard` or `devshard-embedded` mode.
+
+### 1. Download the CLI
+
+Download the latest `inferenced` binary from the [Gonka docs](https://gonka.ai/developer/quickstart/).
+
+```bash
+chmod +x inferenced
+```
+
+### 2. Create an account
+
+```bash
+export ACCOUNT_NAME=my-gonka-account
+export NODE_URL=http://node1.gonka.ai:8000
+
+./inferenced create-client $ACCOUNT_NAME --node-address $NODE_URL
+```
+
+### 3. Export the private key
+
+```bash
+./inferenced keys export $ACCOUNT_NAME --unarmored-hex --unsafe
+```
+
+Add to `.env`:
+
+```env
+GONKA_UPSTREAM_MODE=node
+GONKA_PRIVATE_KEY=<hex key from above>
+GONKA_ADDRESS=gonka1abc123...
+```
+
+### 4. Fund the account
+
+Transfer GNK tokens to your address via the [Gonka.gg Faucet](https://gonka.gg/faucet) or from another funded account.
+
+### Multi-wallet support (node mode only)
+
+Configure multiple wallets for round-robin load distribution:
+
+```env
+GONKA_WALLETS=privkey1:gonka1addr1,privkey2:gonka1addr2,privkey3
+```
+
+## Configuration reference
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `GONKA_UPSTREAM_MODE` | No | `node` | `node`, `devshard`, or `devshard-embedded` |
+| `GATEWAY_URL` | devshard mode | — | External devshard gateway URL |
+| `GATEWAY_API_KEY` | devshard mode | — | Gateway API key for Bearer auth |
+| `DEVSHARD_PRIVATE_KEY` | embedded mode | — | Hex key for escrow creation |
+| `DEVSHARD_TARGETS` | No | `MiniMaxAI/MiniMax-M2.7=6` | Target models and escrow counts |
+| `DEVSHARD_ESCROW_AMOUNT_NGONKA` | No | `1500000000` | Escrow deposit (1.5 GNK) |
+| `SIMULATE_TOOL_CALLS` | No | `false` | Enable tool-call simulation |
+| `NATIVE_TOOL_CALLS` | No | `false` | Forward tool calls natively |
+| `SANITIZE` | No | `false` | Enable privacy sanitization |
+| `PORT` | No | `8080` | HTTP server port |
+
 ## Project structure
 
 ```
 opengnk/
-  cmd/proxy/main.go                       # entry point, server setup, graceful shutdown
+  cmd/proxy/main.go                       # entry point, mode switch, server setup
   internal/
-    api/handler.go                        # HTTP handlers for all endpoints
-    config/config.go                      # environment variable loading
-    signer/signer.go                      # ECDSA secp256k1 request signing
+    api/handler.go                        # HTTP handlers (OpenAI-compatible)
+    config/config.go                      # env loading + mode config
+    upstream/
+      iface.go                            # Upstream interface
+      client.go                           # node-mode ECDSA client (legacy)
+      devshard.go                         # devshard gateway client (Bearer auth)
+    signer/signer.go                      # ECDSA secp256k1 signing (legacy)
+    wallet/pool.go                        # multi-wallet pool (legacy, node mode)
     toolsim/toolsim.go                    # tool-call simulation
-    upstream/client.go                    # upstream HTTP client, endpoint discovery
-    wallet/pool.go                        # multi-wallet pool with round-robin routing
-    sanitize/
-      sanitize.go                         # redaction and restoration core
-      classifier.go                       # Classifier interface
-      ner/ner.go                          # NER sidecar client (Natasha + spaCy)
-      llmclassifier/llmclassifier.go      # local LLM classifier (Ollama)
-  web/index.html                          # chat UI with redaction diff panel
-  sanitize-ner/                           # Python NER sidecar (Docker)
+    sanitize/                             # privacy redaction pipeline
+  web/index.html                          # chat UI
+  docker-compose.yml                      # base compose
+  docker-compose.devshard.yml            # embedded devshard overlay
   Dockerfile
-  docker-compose.yml
   Makefile
 ```
 
