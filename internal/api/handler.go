@@ -18,7 +18,7 @@ import (
 
 // Handler implements all HTTP endpoints.
 type Handler struct {
-	client            *upstream.Client
+	client            upstream.Upstream
 	simulateToolCalls bool
 	nativeToolCalls   bool
 	sanitizer         *sanitize.Sanitizer // nil when sanitization is disabled
@@ -29,7 +29,7 @@ type Handler struct {
 
 // New creates a Handler and kicks off initial model loading.
 // Pass a non-nil sanitizer to enable request/response sanitization.
-func New(client *upstream.Client, simulateToolCalls bool, nativeToolCalls bool, san *sanitize.Sanitizer) *Handler {
+func New(client upstream.Upstream, simulateToolCalls bool, nativeToolCalls bool, san *sanitize.Sanitizer) *Handler {
 	h := &Handler{
 		client:            client,
 		simulateToolCalls: simulateToolCalls,
