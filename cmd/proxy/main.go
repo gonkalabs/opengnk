@@ -30,35 +30,80 @@ func main() {
 		os.Exit(1)
 	}
 
-	var wallets []wallet.Wallet
-	for i, wc := range cfg.Wallets {
-		s, err := signer.New(wc.PrivateKey)
-		if err != nil {
-			slog.Error("signer error", "wallet", i+1, "err", err)
+	// Build the upstream client based on the configured mode.
+	var client upstream.Upstream
+	switch cfg.UpstreamMode {
+	case "devshard":
+		client = upstream.NewDevshardClient(upstream.DevshardConfig{
+			BaseURL: cfg.GatewayURL,
+			APIKey:  cfg.GatewayAPIKey,
+		})
+		slog.Info("using devshard gateway upstream (external)",
+			"gateway_url", cfg.GatewayURL,
+			"api_key_set", cfg.GatewayAPIKey != "",
+		)
+
+	case "devshard-embedded":
+		// In embedded mode the proxy assumes a devshardctl container is running
+		// alongside it (via docker-compose.devshard.yml). The proxy connects to
+		// it over the internal Docker network.
+		gwURL := cfg.GatewayURL
+		if gwURL == "" {
+			gwURL = "http://devshardctl:8080/v1"
+		}
+		gwKey := cfg.GatewayAPIKey
+		if gwKey == "" {
+			slog.Error("devshard-embedded mode requires GATEWAY_API_KEY (the devshard gateway's API key)")
 			os.Exit(1)
 		}
-		wallets = append(wallets, wallet.Wallet{
-			Signer:  s,
-			Address: wc.Address,
+		client = upstream.NewDevshardClient(upstream.DevshardConfig{
+			BaseURL: gwURL,
+			APIKey:  gwKey,
 		})
-	}
+		slog.Info("using devshard gateway upstream (embedded)",
+			"gateway_url", gwURL,
+			"targets", cfg.DevshardTargets,
+		)
 
-	pool, err := wallet.NewPool(wallets)
-	if err != nil {
-		slog.Error("wallet pool error", "err", err)
-		os.Exit(1)
-	}
+	default: // "node"
+		// Legacy ECDSA-signed requests to Gonka nodes.
+		var wallets []wallet.Wallet
+		for i, wc := range cfg.Wallets {
+			s, err := signer.New(wc.PrivateKey)
+			if err != nil {
+				slog.Error("signer error", "wallet", i+1, "err", err)
+				os.Exit(1)
+			}
+			wallets = append(wallets, wallet.Wallet{
+				Signer:  s,
+				Address: wc.Address,
+			})
+		}
 
-	client := upstream.New(cfg.SourceURL, pool, cfg.RetryStrategy, cfg.MaxRetries)
+		pool, err := wallet.NewPool(wallets)
+		if err != nil {
+			slog.Error("wallet pool error", "err", err)
+			os.Exit(1)
+		}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if err := client.DiscoverEndpoints(ctx); err != nil {
-		slog.Error("endpoint discovery failed", "err", err)
+		nodeClient := upstream.New(cfg.SourceURL, pool, cfg.RetryStrategy, cfg.MaxRetries)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := nodeClient.DiscoverEndpoints(ctx); err != nil {
+			slog.Error("endpoint discovery failed", "err", err)
+			cancel()
+			os.Exit(1)
+		}
 		cancel()
-		os.Exit(1)
-	}
-	cancel()
 
+		client = nodeClient
+		slog.Info("using Gonka network node upstream (ECDSA)",
+			"source_url", cfg.SourceURL,
+			"wallets", pool.Len(),
+		)
+	}
+
+	// Sanitization (mode-agnostic).
 	var san *sanitize.Sanitizer
 	if cfg.SanitizeEnabled {
 		var classifiers []sanitize.Classifier
@@ -120,7 +165,7 @@ func main() {
 	}
 	slog.Info("starting proxy server",
 		"addr", cfg.ListenAddr,
-		"wallets", pool.Len(),
+		"upstream_mode", cfg.UpstreamMode,
 		"toolSim", cfg.SimulateToolCalls,
 		"nativeToolCalls", cfg.NativeToolCalls,
 		"sanitize", cfg.SanitizeEnabled,
