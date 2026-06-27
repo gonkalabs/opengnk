@@ -1,0 +1,51 @@
+# docker-compose.devshard.yml — embedded devshard gateway mode.
+#
+# Usage:
+#   GONKA_UPSTREAM_MODE=devshard-embedded
+#   GATEWAY_API_KEY=sk-...  (the devshard gateway API key)
+#   DEVSHARD_PRIVATE_KEY=...  (for escrow creation)
+#   docker compose -f docker-compose.yml -f docker-compose.devshard.yml up -d
+#
+# This adds a devshardctl service running alongside the proxy. The proxy
+# connects to it over the internal Docker network at http://devshardctl:8080/v1.
+
+services:
+  devshardctl:
+    image: ${DEVSHARD_IMAGE:-ghcr.io/gonka-ai/devshard-gateway:mainnet-v0.2.13-latest}
+    restart: unless-stopped
+    environment:
+      DEVSHARD_PORT: "8080"
+      DEVSHARD_API_KEYS: ${GATEWAY_API_KEY:?GATEWAY_API_KEY is required for devshard-embedded mode}
+      DEVSHARD_API_KEY: ${GATEWAY_API_KEY}
+      DEVSHARD_PRIVATE_KEY: ${DEVSHARD_PRIVATE_KEY:?DEVSHARD_PRIVATE_KEY is required for escrow creation}
+      DEVSHARD_TARGETS: ${DEVSHARD_TARGETS:-MiniMaxAI/MiniMax-M2.7=6}
+      DEVSHARD_ESCROW_AMOUNT_NGONKA: ${DEVSHARD_ESCROW_AMOUNT_NGONKA:-1500000000}
+      DEVSHARD_CHAIN_REST: ${DEVSHARD_CHAIN_REST:-http://204.12.168.157:1317}
+      DEVSHARD_PUBLIC_API: ${DEVSHARD_PUBLIC_API:-https://node3.gonka.ai}
+      DEVSHARD_TX_GAS_LIMIT: "700000"
+      DEVSHARD_CAPACITY_AWARE_LIMITS: "on"
+      DEVSHARD_MAINTAINER_ENABLED: "true"
+      DEVSHARD_MAINTAINER_INTERVAL_SEC: "120"
+      DEVSHARD_MAINTAINER_MAX_OPENS_PER_RUN: "3"
+      DEVSHARD_ESCROW_ROTATION_ENABLED: "true"
+      DEVSHARD_ESCROW_ROTATION_SETTLEMENT_ENABLED: "false"
+    volumes:
+      - devshard_data:/root/.devshardctl
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/v1/status > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  proxy:
+    depends_on:
+      devshardctl:
+        condition: service_healthy
+    environment:
+      GONKA_UPSTREAM_MODE: devshard-embedded
+      GATEWAY_URL: http://devshardctl:8080/v1
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY}
+
+volumes:
+  devshard_data:

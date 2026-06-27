@@ -40,6 +40,46 @@ curl http://localhost:8080/v1/chat/completions \
 
 The web UI is available at **http://localhost:8080**.
 
+## Upstream modes
+
+The proxy supports three modes for talking to the Gonka network. Set `GONKA_UPSTREAM_MODE` in your `.env`.
+
+### `node` (default — legacy ECDSA)
+
+Signs each request with ECDSA and sends it directly to Gonka network nodes. Requires a Gonka wallet (private key). This is the original mode.
+
+```env
+GONKA_UPSTREAM_MODE=node
+GONKA_PRIVATE_KEY=your_hex_key
+GONKA_SOURCE_URL=http://node1.gonka.ai:8000
+```
+
+### `devshard` (connect to an external gateway)
+
+Connects to a devshard gateway via a simple API key (Bearer auth). No wallets, no signing — the gateway manages escrows and routing internally. This is the simplest way to use devshards.
+
+```env
+GONKA_UPSTREAM_MODE=devshard
+GATEWAY_URL=http://your-devshard-gateway:8080/v1
+GATEWAY_API_KEY=sk-your-gateway-key
+```
+
+### `devshard-embedded` (self-contained with bundled gateway)
+
+Bundles a devshard-gateway container alongside the proxy — fully self-contained. The gateway creates and manages its own escrows. Requires a Gonka private key for escrow creation.
+
+```env
+GONKA_UPSTREAM_MODE=devshard-embedded
+GATEWAY_API_KEY=sk-your-gateway-key
+DEVSHARD_PRIVATE_KEY=your_hex_key
+DEVSHARD_TARGETS=MiniMaxAI/MiniMax-M2.7=6
+```
+
+```bash
+# Run with the devshard compose overlay:
+docker compose -f docker-compose.yml -f docker-compose.devshard.yml up -d
+```
+
 ## Obtaining a key
 
 You need a Gonka account (private key + address) to sign inference requests.

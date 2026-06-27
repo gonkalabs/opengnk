@@ -27,13 +27,31 @@ type WalletCfg struct {
 
 // Cfg holds all runtime configuration loaded from environment variables.
 type Cfg struct {
-	// Wallets holds one or more signing credentials.
+	// UpstreamMode controls how the proxy talks to the Gonka network.
+	// "node" (default) = ECDSA-signed requests to Gonka nodes (legacy).
+	// "devshard" = Bearer-token requests to an external devshard gateway.
+	// "devshard-embedded" = launch a bundled devshard-gateway container.
+	UpstreamMode string
+
+	// Wallets holds one or more signing credentials (node mode only).
 	// Populated from GONKA_WALLETS (multi) or GONKA_PRIVATE_KEY (single, backward compat).
 	Wallets []WalletCfg
 
-	// Source node URL used to discover active participants.
+	// Source node URL used to discover active participants (node mode).
 	// Falls back to GONKA_ENDPOINT for backward compat.
 	SourceURL string // e.g. http://node2.gonka.ai:8000
+
+	// Devshard gateway config (devshard / devshard-embedded modes).
+	GatewayURL   string // GATEWAY_URL — external gateway base URL
+	GatewayAPIKey string // GATEWAY_API_KEY — gateway API key for Bearer auth
+
+	// Embedded devshard gateway config (devshard-embedded mode).
+	DevshardImage       string // DEVSHARD_IMAGE — gateway container image
+	DevshardPrivateKey  string // DEVSHARD_PRIVATE_KEY — for escrow creation
+	DevshardTargets     string // DEVSHARD_TARGETS — e.g. MiniMaxAI/MiniMax-M2.7=6
+	DevshardEscrowAmount uint64 // DEVSHARD_ESCROW_AMOUNT_NGONKA
+	DevshardChainREST   string // DEVSHARD_CHAIN_REST
+	DevshardPublicAPI   string // DEVSHARD_PUBLIC_API
 
 	// Features
 	SimulateToolCalls bool // rewrite tool-call requests into plain prompts + parse JSON back
@@ -52,7 +70,7 @@ type Cfg struct {
 	SanitizeLLMModel     string  // SANITIZE_LLM_MODEL=qwen3:4b-instruct-2507-q4_K_M
 	SanitizeLLMThreshold float32 // SANITIZE_LLM_THRESHOLD=0 (0 = accept all)
 
-	// Retry behaviour for 429 / 5xx upstream errors.
+	// Retry behaviour for 429 / 5xx upstream errors (node mode).
 	// RetryStrategy controls whether to retry on the same node or rotate to others.
 	RetryStrategy RetryStrategy // "same_node" or "other_nodes" (default)
 	// MaxRetries is the maximum number of retry attempts (0 = unlimited).
@@ -67,10 +85,58 @@ func Load() (*Cfg, error) {
 	// Best-effort: load .env from current directory
 	_ = godotenv.Load()
 
-	wallets, err := loadWallets()
-	if err != nil {
-		return nil, err
+	// Determine upstream mode first — it controls whether wallets are required.
+	upstreamMode := strings.ToLower(strings.TrimSpace(os.Getenv("GONKA_UPSTREAM_MODE")))
+	if upstreamMode == "" {
+		upstreamMode = "node" // backward compat default
 	}
+	switch upstreamMode {
+	case "node", "devshard", "devshard-embedded":
+		// valid
+	default:
+		return nil, fmt.Errorf("invalid GONKA_UPSTREAM_MODE %q: must be node, devshard, or devshard-embedded", upstreamMode)
+	}
+
+	// Wallets are required only in node mode.
+	var wallets []WalletCfg
+	if upstreamMode == "node" {
+		var err error
+		wallets, err = loadWallets()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Devshard gateway config.
+	gatewayURL := strings.TrimSpace(os.Getenv("GATEWAY_URL"))
+	gatewayAPIKey := strings.TrimSpace(os.Getenv("GATEWAY_API_KEY"))
+
+	// Embedded devshard config.
+	devshardImage := strings.TrimSpace(os.Getenv("DEVSHARD_IMAGE"))
+	if devshardImage == "" {
+		devshardImage = "ghcr.io/gonka-ai/devshard-gateway:mainnet-v0.2.13-latest"
+	}
+	devshardPrivateKey := strings.TrimSpace(os.Getenv("DEVSHARD_PRIVATE_KEY"))
+	devshardTargets := strings.TrimSpace(os.Getenv("DEVSHARD_TARGETS"))
+	if devshardTargets == "" {
+		devshardTargets = "MiniMaxAI/MiniMax-M2.7=6"
+	}
+	var devshardEscrowAmount uint64 = 1500000000 // 1.5 GNK
+	if raw := strings.TrimSpace(os.Getenv("DEVSHARD_ESCROW_AMOUNT_NGONKA")); raw != "" {
+		if n, err := strconv.ParseUint(raw, 10, 64); err == nil && n > 0 {
+			devshardEscrowAmount = n
+		}
+	}
+	devshardChainREST := strings.TrimSpace(os.Getenv("DEVSHARD_CHAIN_REST"))
+	if devshardChainREST == "" {
+		devshardChainREST = "http://204.12.168.157:1317"
+	}
+	devshardPublicAPI := strings.TrimSpace(os.Getenv("DEVSHARD_PUBLIC_API"))
+	if devshardPublicAPI == "" {
+		devshardPublicAPI = "https://node3.gonka.ai"
+	}
+
+	// Source URL (node mode only, but parse regardless for backward compat).
 
 	// Source URL: prefer GONKA_SOURCE_URL, fall back to GONKA_ENDPOINT
 	// (strip /v1 suffix so we have a bare node URL)
@@ -151,8 +217,17 @@ func Load() (*Cfg, error) {
 	}
 
 	return &Cfg{
-		Wallets:              wallets,
-		SourceURL:            sourceURL,
+		UpstreamMode:          upstreamMode,
+		Wallets:               wallets,
+		SourceURL:             sourceURL,
+		GatewayURL:            gatewayURL,
+		GatewayAPIKey:         gatewayAPIKey,
+		DevshardImage:         devshardImage,
+		DevshardPrivateKey:    devshardPrivateKey,
+		DevshardTargets:       devshardTargets,
+		DevshardEscrowAmount:  devshardEscrowAmount,
+		DevshardChainREST:     devshardChainREST,
+		DevshardPublicAPI:     devshardPublicAPI,
 		SimulateToolCalls:    simulateToolCalls,
 		NativeToolCalls:      nativeToolCalls,
 		SanitizeEnabled:      sanitizeEnabled,
