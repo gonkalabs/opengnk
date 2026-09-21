@@ -42,16 +42,16 @@ type Cfg struct {
 	SourceURL string // e.g. http://node2.gonka.ai:8000
 
 	// Devshard gateway config (devshard / devshard-embedded modes).
-	GatewayURL   string // GATEWAY_URL — external gateway base URL
+	GatewayURL    string // GATEWAY_URL — external gateway base URL
 	GatewayAPIKey string // GATEWAY_API_KEY — gateway API key for Bearer auth
 
 	// Embedded devshard gateway config (devshard-embedded mode).
-	DevshardImage       string // DEVSHARD_IMAGE — gateway container image
-	DevshardPrivateKey  string // DEVSHARD_PRIVATE_KEY — for escrow creation
-	DevshardTargets     string // DEVSHARD_TARGETS — e.g. MiniMaxAI/MiniMax-M2.7=6
+	DevshardImage        string // DEVSHARD_IMAGE — gateway container image
+	DevshardPrivateKey   string // DEVSHARD_PRIVATE_KEY — for escrow creation
+	DevshardTargets      string // DEVSHARD_TARGETS — e.g. MiniMaxAI/MiniMax-M2.7=6
 	DevshardEscrowAmount uint64 // DEVSHARD_ESCROW_AMOUNT_NGONKA
-	DevshardChainREST   string // DEVSHARD_CHAIN_REST
-	DevshardPublicAPI   string // DEVSHARD_PUBLIC_API
+	DevshardChainREST    string // DEVSHARD_CHAIN_REST
+	DevshardPublicAPI    string // DEVSHARD_PUBLIC_API
 
 	// Features
 	SimulateToolCalls bool // rewrite tool-call requests into plain prompts + parse JSON back
@@ -78,6 +78,15 @@ type Cfg struct {
 
 	// Server
 	ListenAddr string // e.g. :8080
+
+	// SemIf is an optional Jev-style typed-decision scorer. Off unless
+	// SEMIF_BASE_URL is set (dedicated vLLM) or SEMIF_CHAT_FALLBACK is on.
+	SemIfBaseURL      string
+	SemIfAPIKey       string
+	SemIfModel        string
+	SemIfTimeoutSec   int
+	SemIfChatFallback bool
+	SemIfChatModel    string
 }
 
 // Load reads .env (if present) then environment variables and returns Cfg.
@@ -217,17 +226,17 @@ func Load() (*Cfg, error) {
 	}
 
 	return &Cfg{
-		UpstreamMode:          upstreamMode,
-		Wallets:               wallets,
-		SourceURL:             sourceURL,
-		GatewayURL:            gatewayURL,
-		GatewayAPIKey:         gatewayAPIKey,
-		DevshardImage:         devshardImage,
-		DevshardPrivateKey:    devshardPrivateKey,
-		DevshardTargets:       devshardTargets,
-		DevshardEscrowAmount:  devshardEscrowAmount,
-		DevshardChainREST:     devshardChainREST,
-		DevshardPublicAPI:     devshardPublicAPI,
+		UpstreamMode:         upstreamMode,
+		Wallets:              wallets,
+		SourceURL:            sourceURL,
+		GatewayURL:           gatewayURL,
+		GatewayAPIKey:        gatewayAPIKey,
+		DevshardImage:        devshardImage,
+		DevshardPrivateKey:   devshardPrivateKey,
+		DevshardTargets:      devshardTargets,
+		DevshardEscrowAmount: devshardEscrowAmount,
+		DevshardChainREST:    devshardChainREST,
+		DevshardPublicAPI:    devshardPublicAPI,
 		SimulateToolCalls:    simulateToolCalls,
 		NativeToolCalls:      nativeToolCalls,
 		SanitizeEnabled:      sanitizeEnabled,
@@ -240,7 +249,33 @@ func Load() (*Cfg, error) {
 		RetryStrategy:        retryStrategy,
 		MaxRetries:           maxRetries,
 		ListenAddr:           ":" + port,
+		SemIfBaseURL:         strings.TrimRight(strings.TrimSpace(os.Getenv("SEMIF_BASE_URL")), "/"),
+		SemIfAPIKey:          strings.TrimSpace(os.Getenv("SEMIF_API_KEY")),
+		SemIfModel:           strings.TrimSpace(os.Getenv("SEMIF_MODEL")),
+		SemIfTimeoutSec:      envInt("SEMIF_TIMEOUT_SEC", 45, 1),
+		SemIfChatFallback:    envBool("SEMIF_CHAT_FALLBACK", false),
+		SemIfChatModel:       strings.TrimSpace(os.Getenv("SEMIF_CHAT_MODEL")),
 	}, nil
+}
+
+func envBool(key string, fallback bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") || strings.EqualFold(v, "on")
+}
+
+func envInt(key string, fallback, min int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(v)
+	if err != nil || parsed < min {
+		return fallback
+	}
+	return parsed
 }
 
 // loadWallets builds the wallet list from environment variables.

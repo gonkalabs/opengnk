@@ -129,6 +129,10 @@ func main() {
 	}
 
 	handler := api.New(client, cfg.SimulateToolCalls, cfg.NativeToolCalls, san)
+	if rt := api.NewSemIfRuntime(cfg.SemIfBaseURL, cfg.SemIfAPIKey, cfg.SemIfModel, cfg.SemIfTimeoutSec, cfg.SemIfChatFallback, cfg.SemIfChatModel, client); rt != nil {
+		handler.SetSemIf(rt)
+		slog.Info("semif scorer enabled", "model", cfg.SemIfModel, "dedicated_vllm", cfg.SemIfBaseURL != "", "chat_fallback", cfg.SemIfChatFallback)
+	}
 
 	qm := quality.New()
 

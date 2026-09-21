@@ -25,6 +25,8 @@ type Handler struct {
 
 	mu     sync.RWMutex
 	models []json.RawMessage // cached raw model objects from upstream
+
+	semif *semifRuntime // nil unless SEMIF_BASE_URL or SEMIF_CHAT_FALLBACK
 }
 
 // New creates a Handler and kicks off initial model loading.
@@ -45,6 +47,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health", h.health)
 	mux.HandleFunc("GET /v1/models", h.listModels)
 	mux.HandleFunc("POST /v1/chat/completions", h.chatCompletions)
+	mux.HandleFunc("GET /v1/systemone", h.semifCapability)
+	mux.HandleFunc("POST /v1/systemone", h.systemOne)
+	mux.HandleFunc("POST /v1/decisions", h.systemOne)
 	mux.HandleFunc("GET /", h.serveUI)
 }
 
@@ -93,6 +98,14 @@ func (h *Handler) listModels(w http.ResponseWriter, _ *http.Request) {
 				OwnedBy: "gonka",
 			})
 		}
+	}
+	if h.semif != nil && h.semif.enabled() {
+		entries = append(entries, modelEntry{
+			ID:      h.semif.publicModel(),
+			Object:  "model",
+			Created: 1677610602,
+			OwnedBy: "semif",
+		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
